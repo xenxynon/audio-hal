@@ -762,6 +762,7 @@ static const char * const device_table[SND_DEVICE_MAX] = {
     [SND_DEVICE_IN_SPEAKER_MIC_AEC_NS] = "speaker-mic",
     [SND_DEVICE_IN_SPEAKER_MIC_AEC_NS_SB] = "speaker-mic",
     [SND_DEVICE_IN_SPEAKER_MIC_AEC_NS_NN] = "speaker-mic",
+    [SND_DEVICE_IN_SPEAKER_MIC_AEC_AUTO] = "speaker-mic",
     [SND_DEVICE_IN_SPEAKER_DMIC] = "speaker-dmic-endfire",
     [SND_DEVICE_IN_SPEAKER_DMIC_NN] = "dmic-nn",
     [SND_DEVICE_IN_SPEAKER_DMIC_AEC] = "speaker-dmic-endfire",
@@ -1091,6 +1092,7 @@ static int acdb_device_table[SND_DEVICE_MAX] = {
     [SND_DEVICE_IN_SPEAKER_MIC_AEC_NS] = 114,
     [SND_DEVICE_IN_SPEAKER_MIC_AEC_NS_SB] = 174,
     [SND_DEVICE_IN_SPEAKER_MIC_AEC_NS_NN] = 192,
+    [SND_DEVICE_IN_SPEAKER_MIC_AEC_AUTO] = 139,
     [SND_DEVICE_IN_SPEAKER_DMIC] = 43,
     [SND_DEVICE_IN_SPEAKER_DMIC_NN] = 207,
     [SND_DEVICE_IN_SPEAKER_DMIC_AEC] = 115,
@@ -1353,6 +1355,7 @@ static struct name_to_index snd_device_name_index[SND_DEVICE_MAX] = {
     {TO_NAME_INDEX(SND_DEVICE_IN_SPEAKER_MIC_AEC_NS)},
     {TO_NAME_INDEX(SND_DEVICE_IN_SPEAKER_MIC_AEC_NS_SB)},
     {TO_NAME_INDEX(SND_DEVICE_IN_SPEAKER_MIC_AEC_NS_NN)},
+    {TO_NAME_INDEX(SND_DEVICE_IN_SPEAKER_MIC_AEC_AUTO)},
     {TO_NAME_INDEX(SND_DEVICE_IN_SPEAKER_DMIC)},
     {TO_NAME_INDEX(SND_DEVICE_IN_SPEAKER_DMIC_NN)},
     {TO_NAME_INDEX(SND_DEVICE_IN_SPEAKER_DMIC_AEC)},
@@ -2716,6 +2719,7 @@ static void set_platform_defaults(struct platform_data * my_data)
     hw_interface_table[SND_DEVICE_IN_SPEAKER_MIC_AEC_NS] = strdup("SLIMBUS_0_TX");
     hw_interface_table[SND_DEVICE_IN_SPEAKER_MIC_AEC_NS_SB] = strdup("SLIMBUS_0_TX");
     hw_interface_table[SND_DEVICE_IN_SPEAKER_MIC_AEC_NS_NN] = strdup("SLIMBUS_0_TX");
+    hw_interface_table[SND_DEVICE_IN_SPEAKER_MIC_AEC_AUTO] = strdup("SLIMBUS_0_TX");
     hw_interface_table[SND_DEVICE_IN_SPEAKER_DMIC] = strdup("SLIMBUS_0_TX");
     hw_interface_table[SND_DEVICE_IN_SPEAKER_DMIC_NN] = strdup("SLIMBUS_0_TX");
     hw_interface_table[SND_DEVICE_IN_SPEAKER_DMIC_AEC] = strdup("SLIMBUS_0_TX");
@@ -3056,6 +3060,7 @@ const char * platform_get_snd_card_name_for_acdb_loader(const char *snd_card_nam
     return acdb_card_name;
 }
 
+#ifndef DAEMON_SUPPORT_AUTO
 static int platform_acdb_init(void *platform)
 {
     struct platform_data *my_data = (struct platform_data *)platform;
@@ -3115,6 +3120,7 @@ cleanup:
     }
     return result;
 }
+#endif
 
 #define MAX_PATH             (256)
 #define THERMAL_SYSFS "/sys/class/thermal"
@@ -4687,8 +4693,23 @@ void platform_snd_card_update(void *platform, card_status_t card_status)
 
     if (card_status == CARD_STATUS_ONLINE) {
         if (!platform_is_acdb_initialized(my_data)) {
+#ifdef DAEMON_SUPPORT_AUTO
+        struct audio_device *adev = ((struct platform_data *)platform)->adev;
+        int result = acdb_init_v2(adev->mixer);
+        if (!result) {
+            my_data->is_acdb_initialized = true;
+            ALOGD("ACDB initialized");
+            audio_hwdep_send_cal(my_data);
+        } else {
+            my_data->is_acdb_initialized = false;
+            ALOGD("ACDB initialization failed");
+            if (my_data->acdb_deallocate)
+                my_data->acdb_deallocate();
+        }
+#else
             if(platform_acdb_init(my_data))
                 ALOGE("%s: acdb initialization is failed", __func__);
+#endif
         } else if (my_data->acdb_send_common_top() < 0) {
                 ALOGD("%s: acdb did not set common topology", __func__);
         }
@@ -7219,12 +7240,17 @@ static snd_device_t get_snd_device_for_voice_comm_ecns_enabled(struct platform_d
                                         : SND_DEVICE_IN_SPEAKER_DMIC_AEC_NS);
             }
             adev->acdb_settings |= DMIC_FLAG;
-        } else
+        } else {
+#ifndef PLATFORM_AUTO
             snd_device = my_data->fluence_sb_enabled ?
                              SND_DEVICE_IN_SPEAKER_MIC_SB
                              : (my_data->fluence_nn_enabled ?
                                  SND_DEVICE_IN_SPEAKER_MIC_NN
                                  : SND_DEVICE_IN_SPEAKER_MIC);
+#else
+            snd_device = SND_DEVICE_IN_SPEAKER_MIC_AEC_AUTO;
+#endif
+        }
     } else if (compare_device_type(in_devices, AUDIO_DEVICE_IN_BUILTIN_MIC)) {
         if ((my_data->fluence_type & FLUENCE_TRI_MIC) &&
             (my_data->source_mic_type & SOURCE_THREE_MIC)) {
@@ -10244,7 +10270,7 @@ static void platform_check_hdmi_backend_cfg(struct audio_device* adev,
     controller = usecase->stream.out->extconn.cs.controller;
     stream = usecase->stream.out->extconn.cs.stream;
 
-    if (controller < 0 || controller > MAX_CONTROLLERS ||
+    if (controller < 0 || controller >= MAX_CONTROLLERS ||
             stream < 0 || stream >= MAX_STREAMS_PER_CONTROLLER) {
         controller = 0;
         stream = 0;
@@ -11953,7 +11979,7 @@ int platform_set_edid_channels_configuration_v2(void *platform, int channels,
         return -EINVAL;
     }
 
-    if (controller < 0 || controller > MAX_CONTROLLERS ||
+    if (controller < 0 || controller >= MAX_CONTROLLERS ||
             stream < 0 || stream >= MAX_STREAMS_PER_CONTROLLER) {
         ALOGE("%s: Invalid controller/stream - %d/%d",
               __func__, controller, stream);
@@ -12070,7 +12096,7 @@ void platform_invalidate_hdmi_config_v2(void * platform, int controller, int str
     int backend_idx;
     snd_device_t snd_device;
 
-    if (controller < 0 || controller > MAX_CONTROLLERS ||
+    if (controller < 0 || controller >= MAX_CONTROLLERS ||
             stream < 0 || stream >= MAX_STREAMS_PER_CONTROLLER) {
         ALOGE("%s: Invalid controller/stream - %d/%d",
               __func__, controller, stream);
