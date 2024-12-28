@@ -1,0 +1,1 @@
+../hal/audio_extn/audio_hw.h
